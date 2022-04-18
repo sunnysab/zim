@@ -15,6 +15,7 @@ use crate::errors::{Error, Result};
 pub enum Compression {
     None = 0,
     LZMA2 = 4,
+    Zstd = 5,
 }
 
 impl From<Compression> for u8 {
@@ -29,6 +30,7 @@ impl Compression {
             0 => Ok(Compression::None),
             1 => Ok(Compression::None),
             4 => Ok(Compression::LZMA2),
+            5 => Ok(Compression::Zstd),
             _ => Err(Error::UnknownCompression),
         }
     }
@@ -174,8 +176,8 @@ impl<'a> InnerCluster<'a> {
 
     fn needs_decompression(&self) -> bool {
         match self.compression {
-            Compression::LZMA2 => self.decompressed.is_none() || self.blob_list.is_none(),
             Compression::None => false,
+            _ => self.decompressed.is_none() || self.blob_list.is_none(),
         }
     }
 
@@ -189,12 +191,18 @@ impl<'a> InnerCluster<'a> {
                     self.decompressed = Some(d);
                 }
             }
+            Compression::Zstd => {
+                if self.decompressed.is_none() {
+                    let result = zstd::decode_all(self.view).expect("Failed to read content compressed in zstd.");
+                    self.decompressed = Some(result);
+                }
+            }
             Compression::None => {}
         }
 
         if self.blob_list.is_none() {
             match self.compression {
-                Compression::LZMA2 => {
+                Compression::LZMA2 | Compression::Zstd => {
                     let cur = Cursor::new(self.decompressed.as_ref().unwrap());
                     let blob_list = parse_blob_list(cur, self.extended)?;
                     self.blob_list = Some(blob_list);
@@ -218,7 +226,7 @@ impl<'a> InnerCluster<'a> {
                 };
 
                 Ok(match self.compression {
-                    Compression::LZMA2 => {
+                    Compression::LZMA2 | Compression::Zstd => {
                         // decompressed, so we know this exists
                         &self.decompressed.as_ref().unwrap().as_slice()[start..end]
                     }
@@ -236,6 +244,7 @@ impl<'a> InnerCluster<'a> {
 ///   - 0: default (no compression),
 ///   - 1: none (inherited from Zeno),
 ///   - 4: LZMA2 compressed
+///   - 5: Zstd compressed
 /// Firth bits :
 ///   - 0: normal (OFFSET_SIZE=4)
 ///   - 1: extended (OFFSET_SIZE=8)
